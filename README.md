@@ -15,7 +15,8 @@
 
 > 想改文案只要改 `index.html` 里 `var CONFIG = {...}` 那几行：
 > `name` 祝福对象、`merry` 第一行大字、`cn` 第二行小字、
-> `autoRotate` 旋转速度、`camera` 是否显示摄像头按钮（`false` 就隐藏）。
+> `autoRotate` 旋转速度、`camera` 是否显示摄像头按钮（`false` 就隐藏）、
+> `cameraSensitivity` 动作灵敏度（默认 14，觉得不灵就调大，觉得乱闪就调小）。
 
 更顺手的方式：在仓库页面按键盘 **`.`**（句号）会打开 VS Code 网页版（github.dev），
 可以像本地编辑器一样改、看高亮，改完在左侧源代码管理面板一键提交。
