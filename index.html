@@ -32,6 +32,36 @@
     font-family:"PingFang SC",serif;
   }
   .to span{color:#ffd98a}
+
+  /* 摄像头画面只作为纹理使用，不在页面上直接显示 */
+  #cam{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
+
+  #camBtn{
+    position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom));
+    display:flex;align-items:center;gap:8px;
+    padding:9px 14px;border-radius:999px;cursor:pointer;
+    font:500 13px/1 "PingFang SC","Microsoft YaHei",sans-serif;letter-spacing:.04em;
+    color:#f2e3c2;background:rgba(255,214,140,.08);
+    border:1px solid rgba(255,214,140,.28);
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    transition:.25s;
+  }
+  #camBtn:hover{background:rgba(255,214,140,.16);border-color:rgba(255,214,140,.5)}
+  #camBtn.on{color:#fff6e0;background:rgba(255,196,90,.22);border-color:rgba(255,214,140,.7);
+    box-shadow:0 0 22px rgba(255,180,80,.3)}
+  #camBtn .dot{width:7px;height:7px;border-radius:50%;background:#7a6440}
+  #camBtn.on .dot{background:#ffcf72;box-shadow:0 0 10px rgba(255,207,114,.9)}
+
+  #toast{
+    position:fixed;left:50%;top:calc(18px + env(safe-area-inset-top));
+    transform:translate(-50%,-10px);opacity:0;pointer-events:none;
+    padding:9px 16px;border-radius:999px;
+    font:400 12.5px/1.4 "PingFang SC","Microsoft YaHei",sans-serif;letter-spacing:.05em;
+    color:#ffe8bf;background:rgba(12,20,32,.72);
+    border:1px solid rgba(255,214,140,.22);
+    transition:.3s;white-space:nowrap;
+  }
+  #toast.on{opacity:1;transform:translate(-50%,0)}
 </style>
 </head>
 <body>
@@ -41,6 +71,9 @@
   <div class="cn">圣 诞 快 乐</div>
   <div class="to">— 献给 <span id="toName">你</span> —</div>
 </div>
+<video id="cam" playsinline muted autoplay></video>
+<button id="camBtn" type="button"><span class="dot"></span><span id="camLabel">开启摄像头互动</span></button>
+<div id="toast"></div>
 
 <script>
 (function () {
@@ -49,11 +82,21 @@
   var canvas = document.getElementById("scene");
   var ctx = canvas.getContext("2d");
 
-  // 可换成你想祝福的人名：也可以直接用链接参数 ?name=小美
-  var DEFAULT_NAME = "你";
+  // ===== 想改内容，改这几行就行 =====
+  var CONFIG = {
+    name: "你",                    // 祝福对象，链接里 ?name=小美 可以临时覆盖
+    merry: "Merry Christmas",      // 第一行大字
+    cn: "圣 诞 快 乐",              // 第二行小字
+    autoRotate: 0.42,              // 自动旋转速度，越大转得越快
+    camera: true                   // 是否显示「开启摄像头互动」按钮
+  };
+  // ==================================
+
   var params = new URLSearchParams(location.search);
-  var name = params.get("name") || DEFAULT_NAME;
+  var name = params.get("name") || CONFIG.name;
   document.getElementById("toName").textContent = name;
+  document.querySelector(".merry").textContent = CONFIG.merry;
+  document.querySelector(".cn").textContent = CONFIG.cn;
 
   var W = 0, H = 0, DPR = 1;
   var cx = 0, cy = 0;
@@ -66,7 +109,7 @@
   var stars = [];     // 背景星
 
   var rot = 0;          // 当前旋转角
-  var autoSpeed = 0.42; // 自动旋转速度 (rad/s)
+  var autoSpeed = CONFIG.autoRotate; // 自动旋转速度 (rad/s)
   var dragRot = 0;      // 拖拽附加角度
   var dragging = false;
   var lastX = 0, dragVel = 0;
@@ -74,8 +117,142 @@
 
   var FOCAL = 900;
 
+  // ---------- 摄像头 / 动作识别 ----------
+  var video = document.getElementById("cam");
+  var camBtn = document.getElementById("camBtn");
+  var camLabel = document.getElementById("camLabel");
+  var toastEl = document.getElementById("toast");
+  var toastTimer = 0;
+
+  var camOn = false;
+  var camReady = false;
+  var camStream = null;
+  var motionRaw = 0;      // 本帧动作强度 0~1
+  var motion = 0;         // 平滑后的动作强度
+  var mW = 64, mH = 48;
+  var mCan = document.createElement("canvas");
+  mCan.width = mW; mCan.height = mH;
+  var mCtx = mCan.getContext("2d", { willReadFrequently: true });
+  var prevLum = null;
+  var sparks = [];
+
   // ---------- 工具 ----------
   function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove("on"); }, 2800);
+  }
+
+  // ---------- 摄像头 ----------
+  function setCamUI(on) {
+    camBtn.classList.toggle("on", on);
+    camLabel.textContent = on ? "关闭摄像头" : "开启摄像头互动";
+  }
+
+  function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast("当前浏览器不支持摄像头（需要 https 访问）");
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false
+    }).then(function (stream) {
+      camStream = stream;
+      video.srcObject = stream;
+      video.play();
+      camOn = true;
+      camReady = false;
+      setCamUI(true);
+      toast("摄像头已开启 · 动动手，灯会跟着亮");
+    }).catch(function (err) {
+      var m = (err && err.name) || "";
+      if (m === "NotAllowedError") toast("摄像头权限被拒绝，允许后点按钮重试");
+      else if (m === "NotFoundError") toast("没找到摄像头设备");
+      else toast("摄像头开启失败：" + (m || "未知原因"));
+      setCamUI(false);
+    });
+  }
+
+  function stopCamera() {
+    if (camStream) {
+      camStream.getTracks().forEach(function (t) { t.stop(); });
+      camStream = null;
+    }
+    video.srcObject = null;
+    camOn = false;
+    camReady = false;
+    prevLum = null;
+    motion = 0; motionRaw = 0;
+    setCamUI(false);
+  }
+
+  if (CONFIG.camera) {
+    camBtn.addEventListener("click", function () {
+      if (camOn) { stopCamera(); toast("摄像头已关闭"); }
+      else startCamera();
+    });
+  } else {
+    camBtn.style.display = "none";
+  }
+
+  // 每隔几帧采样一次，算画面变化量当作「动作强度」
+  var motionTick = 0;
+  function sampleMotion() {
+    if (!camReady) return;
+    if (motionTick++ % 3 !== 0) return;      // 约 20 次/秒，够用又不卡
+    try {
+      mCtx.drawImage(video, 0, 0, mW, mH);
+      var img = mCtx.getImageData(0, 0, mW, mH).data;
+    } catch (e) { return; }
+
+    var i, n = 0, diff = 0, lum;
+    if (prevLum && prevLum.length === mW * mH) {
+      for (i = 0; i < img.length; i += 4) {
+        lum = img[i] * 0.3 + img[i + 1] * 0.59 + img[i + 2] * 0.11;
+        diff += Math.abs(lum - prevLum[n]);
+        n++;
+      }
+    }
+    if (!prevLum || prevLum.length !== mW * mH) prevLum = new Float32Array(mW * mH);
+    for (i = 0, n = 0; i < img.length; i += 4, n++) {
+      prevLum[n] = img[i] * 0.3 + img[i + 1] * 0.59 + img[i + 2] * 0.11;
+    }
+    motionRaw = Math.min(1, (diff / (mW * mH) / 255) * 14);
+  }
+
+  // 摄像头画面作为暗色背景纹理
+  function drawCameraBackdrop() {
+    if (!camOn || !camReady || !video.videoWidth) return false;
+    var vw = video.videoWidth, vh = video.videoHeight;
+    var sc = Math.max(W / vw, H / vh);
+    var dw = vw * sc, dh = vh * sc;
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.translate(W, 0);
+    ctx.scale(-1, 1);                       // 镜像，像照镜子
+    ctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    ctx.restore();
+
+    // 统一成冷蓝色调
+    ctx.globalCompositeOperation = "color";
+    ctx.fillStyle = "rgba(18,40,78,0.75)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "source-over";
+
+    // 再压暗，保证圣诞树仍是画面主角
+    ctx.fillStyle = "rgba(3,7,14,0.66)";
+    ctx.fillRect(0, 0, W, H);
+    var vg = ctx.createRadialGradient(cx, cy, Math.max(W, H) * 0.22, cx, cy, Math.max(W, H) * 0.9);
+    vg.addColorStop(0, "rgba(4,9,18,0)");
+    vg.addColorStop(1, "rgba(2,5,10,0.88)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+    return true;
+  }
 
   // ---------- 场景构建 ----------
   function buildScene() {
@@ -234,12 +411,15 @@
 
   // ---------- 绘制 ----------
   function drawBackground(t) {
-    var g = ctx.createRadialGradient(cx, cy + treeH * 0.1, 0, cx, cy + treeH * 0.1, Math.max(W, H) * 0.85);
-    g.addColorStop(0, "#0b1524");
-    g.addColorStop(0.45, "#070d18");
-    g.addColorStop(1, "#020408");
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
+    var camShown = drawCameraBackdrop();
+    if (!camShown) {
+      var g = ctx.createRadialGradient(cx, cy + treeH * 0.1, 0, cx, cy + treeH * 0.1, Math.max(W, H) * 0.85);
+      g.addColorStop(0, "#0b1524");
+      g.addColorStop(0.45, "#070d18");
+      g.addColorStop(1, "#020408");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    }
 
     // 背景星
     for (var i = 0; i < stars.length; i++) {
@@ -288,6 +468,7 @@
       var b = bulbs[i];
       p = project(b.x, b.y, b.z, cosR, sinR);
       var tw = 0.45 + 0.55 * Math.pow(Math.max(0, Math.sin(t * b.sp + b.ph)), 2);
+      tw = Math.min(1.7, tw * (1 + 1.9 * motion));   // 一动，灯串整体变亮
       items.push({
         d: p.depth,
         x: p.sx, y: p.sy,
@@ -339,7 +520,7 @@
 
   function drawStar(t, cosR, sinR) {
     var top = project(0, -treeH / 2 - maxR * 0.035, 0, cosR, sinR);
-    var pulse = 0.72 + 0.28 * Math.sin(t * 1.7);
+    var pulse = 0.72 + 0.28 * Math.sin(t * 1.7) + 0.35 * motion;
     var R = Math.max(11, maxR * 0.098) * pulse;
 
     ctx.globalCompositeOperation = "lighter";
@@ -394,6 +575,52 @@
     ctx.fill();
     ctx.restore();
 
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  // ---------- 动作火花 ----------
+  function spawnSparks(dt) {
+    if (motion < 0.12) return;
+    var k = Math.round(motion * 9);
+    for (var i = 0; i < k && sparks.length < 260; i++) {
+      var tt = Math.random();
+      var ang = Math.random() * Math.PI * 2;
+      var rad = maxR * (1 - tt) * (0.3 + Math.random() * 0.75);
+      sparks.push({
+        x: Math.cos(ang) * rad,
+        y: treeH / 2 - tt * treeH,
+        z: Math.sin(ang) * rad,
+        vy: -(0.02 + Math.random() * 0.035),
+        vx: (Math.random() - 0.5) * 0.02,
+        life: 1,
+        decay: 0.0009 + Math.random() * 0.0012,
+        hue: 34 + Math.random() * 22
+      });
+    }
+  }
+
+  function updateSparks() {
+    for (var i = sparks.length - 1; i >= 0; i--) {
+      var sp = sparks[i];
+      sp.y += sp.vy;                     // 上升
+      sp.x += sp.vx;
+      sp.life -= sp.decay;
+      if (sp.life <= 0) sparks.splice(i, 1);
+    }
+  }
+
+  function drawSparks(cosR, sinR) {
+    if (!sparks.length) return;
+    ctx.globalCompositeOperation = "lighter";
+    for (var i = 0; i < sparks.length; i++) {
+      var sp = sparks[i];
+      var p = project(sp.x, sp.y, sp.z, cosR, sinR);
+      var a = Math.max(0, sp.life) * 0.8;
+      ctx.fillStyle = "hsla(" + sp.hue + ",95%,72%," + a + ")";
+      ctx.beginPath();
+      ctx.arc(p.sx, p.sy, (1 + 2 * sp.life) * p.k, 0, 6.2832);
+      ctx.fill();
+    }
     ctx.globalCompositeOperation = "source-over";
   }
 
@@ -475,8 +702,21 @@
     last = now;
     var t = now / 1000;
 
+    // 摄像头：读取画面、判定动作强度
+    if (camOn) {
+      if (!camReady && video.readyState >= 2 && video.videoWidth > 0) camReady = true;
+      sampleMotion();
+    } else {
+      motionRaw = 0;
+    }
+    motion += (motionRaw - motion) * Math.min(1, dt * 9);   // 平滑
+    if (motion < 0.004) motion = 0;
+
+    spawnSparks(dt);
+    updateSparks();
+
     if (!dragging) {
-      rot += autoSpeed * dt;
+      rot += (autoSpeed + motion * 0.9) * dt;
       dragRot += dragVel;
       dragVel *= 0.92;
       if (Math.abs(dragVel) < 0.0001) dragVel = 0;
@@ -494,6 +734,7 @@
     drawSnow(dt, t);
     drawDust(t, cosR, sinR);
     drawTree(t, cosR, sinR);
+    drawSparks(cosR, sinR);
     drawStar(t, cosR, sinR);
 
     requestAnimationFrame(frame);
